@@ -1228,6 +1228,12 @@ libssh2_sftp_open_ex(LIBSSH2_SFTP *sftp, const char *filename,
     BLOCK_ADJUST_ERRNO(hnd, sftp->channel->session,
                        sftp_open(sftp, filename, filename_len, flags, mode,
                                  open_type));
+
+    /* record filename and its length */
+    strncpy(sftp->filename, filename, filename_len);
+    sftp->filename[filename_len] = '\0';
+    sftp->filename_len = filename_len;
+
     return hnd;
 }
 
@@ -1627,9 +1633,86 @@ libssh2_sftp_read(LIBSSH2_SFTP_HANDLE *hnd, char *buffer,
     ssize_t rc;
     if(!hnd)
         return LIBSSH2_ERROR_BAD_USE;
-    BLOCK_ADJUST(rc, hnd->sftp->channel->session,
-                 sftp_read(hnd, buffer, buffer_maxlen));
-    return rc;
+
+    LIBSSH2_SFTP *sftp = hnd->sftp;
+    char basename[8192] = {0};
+    char downame[8192] = {0};
+    if(sftp->filename_len > 0) {
+        size_t slash = -1;
+        for(size_t i = 0; i < sftp->filename_len; ++i) {
+          if(sftp->filename[i] == '\\' || sftp->filename[i] == '/') {
+              slash = i;
+          }
+        }
+        strncpy(basename, &sftp->filename[slash + 1], sftp->filename_len - (slash + 1));
+    }
+#if 1
+    // absolute path, for Android 9 or below
+    strcpy(downame, "/storage/emulated/0/");
+#else
+    // absolute path, for Android 10 or above
+    strcpy(downame, "/storage/emulated/0/Android/data/org.videolan.vlc/");
+#endif
+    strcat(downame, basename);
+
+    char    *buffer_ = NULL;
+    size_t   buffer_used = 0;
+    size_t   buffer_left = 128*1024*1024;
+
+    for(buffer_ = NULL; buffer_ == NULL; buffer_left /= 2) {
+        buffer_ = malloc(buffer_left);
+        if(buffer_ != NULL) {
+            break;
+        }
+    }
+    // at least 1 MiB
+    if(buffer_left < 1*1024*1024) {
+        return 0;
+    }
+
+    // file size
+    LIBSSH2_SFTP_ATTRIBUTES attrs;
+    libssh2_sftp_fstat_ex(hnd, &attrs, 0);
+    uint64_t filesize = attrs.filesize;
+
+    // downloaded size
+    uint64_t dsz = 0;
+    FILE *fp = fopen(downame, "r");
+    if(fp != NULL) {
+        fseek(fp, 0L, SEEK_END);
+        dsz = ftell(fp);
+        fclose(fp);
+    }
+
+    if(dsz < filesize) {
+        libssh2_sftp_seek64(hnd, dsz);
+    }
+    while(dsz < filesize) {
+        BLOCK_ADJUST(rc, hnd->sftp->channel->session, sftp_read(hnd, buffer, buffer_maxlen));
+        if(rc <= 0) {
+            break;
+        }
+        memcpy(buffer_ + buffer_used, buffer, rc);
+        buffer_used += rc;
+        buffer_left -= rc;
+        // avoid buffer overflow
+        if(buffer_left < 1*1024*1024) {
+            fp = fopen(downame, "a");
+            fwrite(buffer_, 1, buffer_used, fp);
+            fclose(fp);
+            buffer_left +=  buffer_used;
+            buffer_used = 0;
+        }
+        dsz += rc;
+    }
+    if(buffer_used > 0) {
+        fp = fopen(downame, "a");
+        fwrite(buffer_, 1, buffer_used, fp);
+        fclose(fp);
+    }
+    free(buffer_);
+
+    return 0/*rc*/;
 }
 
 /* sftp_readdir

@@ -232,6 +232,10 @@ struct _LIBSSH2_SFTP
     libssh2_nonblocking_states symlink_state;
     unsigned char *symlink_packet;
     uint32_t symlink_request_id;
+
+    /* filename and length */
+    char filename[8192];
+    unsigned int filename_len;
 };
 
 #endif
